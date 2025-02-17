@@ -5,16 +5,10 @@ from datetime import datetime
 import subprocess
 import shutil
 import hashlib
-from cpapis import whmapi1
 import gzip
 from bakauth import BakAuth
 
-from argparse import ArgumentParser
-
-
-#BACKUP_DIR = Path('/backups/db_backups')
 BACKUP_DIR = Path('/backups/db_backups')
-AUTH_FILES = Path('/root/baksync_auth_files')
 LIST_FILES = Path('/root/db_lists')
 PRIMARY_AUTH_FILE = Path('/opt/backups/etc/auth.json')
 RETENTION_DAYS = 14
@@ -112,7 +106,7 @@ def backup_dbs(backup_dir: Path):
         try:
             with backup_file.open('wb') as f:
                 dump_cmd.run(check=True, stdout=f)
-                compute_hash(backup_file)
+            compute_hash(backup_file)
         except subprocess.CalledProcessError:
             backup_file.unlink()
 
@@ -120,30 +114,30 @@ def backup_dbs(backup_dir: Path):
             with LOG_FILE.open('a') as f:
                 f.write(f'backed up {db} to {backup_file}\n')
                 f.close()
+            try:
+                yesterday = get_yesterdays_backup(backup_dir, db)
+            except FileNotFoundError:
+                with LOG_FILE.open('a') as f:
+                    f.write(f'No previous backup found for {db}\n')
+                    f.close()
+                    gzip_file(backup_file)
+            else:
+                if check_hash(backup_file, yesterday):
+                    with LOG_FILE.open('a') as f:
+                        f.write(f'Backup for {db} matches previous backup\nhardlinking{yesterday} to {backup_file}\n')
+                        f.close()
+                    backup_file.unlink()
+                    #backup_file.link_to(yesterday)
+                    yesterday.link_to(backup_file)
+                else:
+                    gzip_file(backup_file)
+                    with LOG_FILE.open('a') as f:
+                        f.write(f'Backup for {db} does not match previous backup\n')
+                        f.close()
         else:
             with LOG_FILE.open('a') as f:
                 f.write(f'failed to backup {db} to {backup_file}\n')
                 f.close()
-        try:
-            yesterday = get_yesterdays_backup(backup_dir, db)
-        except FileNotFoundError:
-            with LOG_FILE.open('a') as f:
-                f.write(f'No previous backup found for {db}\n')
-                f.close()
-                gzip_file(backup_file)
-        else:
-            if check_hash(backup_file, yesterday):
-                with LOG_FILE.open('a') as f:
-                    f.write(f'Backup for {db} matches previous backup\nhardlinking{yesterday} to {backup_file}\n')
-                    f.close()
-                backup_file.unlink()
-                #backup_file.link_to(yesterday)
-                yesterday.link_to(backup_file)
-            else:
-                gzip_file(backup_file)
-                with LOG_FILE.open('a') as f:
-                    f.write(f'Backup for {db} does not match previous backup\n')
-                    f.close()
 
 
 # swaps the BUM auth file for the specified servers auth file
