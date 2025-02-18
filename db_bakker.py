@@ -10,9 +10,10 @@ from pathlib import Path
 
 CWD = Path(__file__).parent
 BACKUP_DIR = CWD / ('backups')
-RETENTION_DAYS = 14
+RETENTION = 14
 TEST_MODE = False  # set to True to test without deleting older backups
 LOG_FILE = CWD / ('baksynk_bakker.log')
+CURRENT_DATE = datetime.now().strftime('%Y-%m-%d')
 
 if not LOG_FILE.exists():
     LOG_FILE.touch()
@@ -23,8 +24,9 @@ if not BACKUP_DIR.exists():
 
 def log(msg: str):
     """Simple log appender."""
+    current_time = datetime.now().strftime('%H:%M:%S')
     with LOG_FILE.open('a') as f:
-        f.write(f"{msg}\n")
+        f.write(f"{CURRENT_DATE}-{current_time}:{msg}\n")
 
 def gzip_file(file: Path):
     """Gzip the given file and remove the original."""
@@ -33,7 +35,10 @@ def gzip_file(file: Path):
     file.unlink()
 
 def compute_hash(file: Path) -> str:
-    """Compute and store a SHA256 hash for the file."""
+    """
+    creates a hash file prior to gzipping
+    This has to be done before gzipping because gzip timestamps the file
+    """
     hash_func = hashlib.new('sha256')
     hash_dir = file.parent / '.hashes'
     hash_dir.mkdir(exist_ok=True)
@@ -44,10 +49,8 @@ def compute_hash(file: Path) -> str:
             if not chunk:
                 break
             hash_func.update(chunk)
-
     hash_hex = hash_func.hexdigest()
-
-    # Store hash
+    #
     hash_file = hash_dir / f'{file.name}.hash'
     with hash_file.open('w') as hf:
         hf.write(hash_hex)
@@ -55,13 +58,10 @@ def compute_hash(file: Path) -> str:
     return hash_hex
 
 def read_hash(file: Path) -> str | None:
-    """
-    Read the hash of a previously gzipped file or normal .sql file.
-    If the file is f'{something}.sql' or f'{something}.sql.gz',
-    then the hash file is stored as .hashes/something.sql.hash
-    """
+    """returns hash for a given backup file"""
     hash_dir = file.parent / '.hashes'
-    # if file is .sql.gz, strip the .gz
+    #all previous file paths have a .gz extension but the 
+    #hash file does not so we strip it before looking for the hash file
     base_name = file.name
     base_name = base_name.strip('.gz')
 
@@ -73,8 +73,7 @@ def read_hash(file: Path) -> str | None:
 
 def check_hash(new_file: Path, old_file: Path) -> bool:
     """
-    Compare the hash of the newly-dumped .sql file to the stored
-    hash of the old .sql(.gz).
+    compares current backups hash with previous backups hash
     """
     if not old_file.exists():
         return False
@@ -84,10 +83,9 @@ def check_hash(new_file: Path, old_file: Path) -> bool:
         return False
     return new_hash == old_hash
 
-def get_yesterdays_backup(current_dated_dir: Path, database: str) -> Path:
+def get_previous_backup(current_dated_dir: Path, database: str) -> Path:
     """
-    Try to locate the .sql.gz file from the previous day (the second-last folder).
-    Raises FileNotFoundError if there's no previous directory or backup.
+    Locates the most recent backup of the same file
     """
     dated_dirs = sorted(current_dated_dir.parent.glob('*'))
     if len(dated_dirs) > 1:
@@ -102,15 +100,16 @@ def get_yesterdays_backup(current_dated_dir: Path, database: str) -> Path:
 
 def backup_retention():
     """
-    Keep RETENTION_DAYS subdirectories of BACKUP_DIR.
-    Delete older ones unless TEST_MODE is True.
+    retention policy for backups
+    it says days but it's really the number of backups to keep
+    I'm not fixing it.
     """
     dated_dirs = sorted(BACKUP_DIR.glob('*'))
     num_dirs = len(dated_dirs)
-    if num_dirs <= RETENTION_DAYS:
+    if num_dirs <= RETENTION:
         log(f"Currently have {num_dirs} backups. Retention set to {RETENTION_DAYS}. Nothing to remove.")
     else:
-        to_remove = dated_dirs[:-RETENTION_DAYS]
+        to_remove = dated_dirs[:-RETENTION]
         for old_dir in to_remove:
             if TEST_MODE:
                 log(f"[TEST_MODE] Would remove {old_dir}")
@@ -143,7 +142,7 @@ def list_databases(host: str, port: int, user: str, password: str) -> list[str]:
 def backup_databases(backup_dir: Path, host: str, port: int, user: str, password: str):
     """
     For each database on the server, run mysqldump, compute the hash, and
-    check if we can deduplicate (hardlink) against yesterday's backup.
+    check if we can deduplicate (hardlink) against previous's backup.
     """
     databases = list_databases(host, port, user, password)
     for db in databases:
@@ -167,20 +166,20 @@ def backup_databases(backup_dir: Path, host: str, port: int, user: str, password
 
             # Attempt to locate a previous backup
             try:
-                yesterdays_backup = get_yesterdays_backup(backup_dir, db)
+                previous_backup = get_previous_backup(backup_dir, db)
             except FileNotFoundError:
                 # No previous backup -> just compress
                 log(f"No previous backup for {db} found, gzipping new backup.")
                 gzip_file(backup_file)
             else:
                 # We found a previous .sql.gz file
-                if check_hash(backup_file, yesterdays_backup):
+                if check_hash(backup_file, previous_backup):
                     # If matches, remove the new backup_file and hardlink old to new
                     log(f"Backup for {db} matches previous backup. Hardlinking old -> new.")
                     backup_file.unlink()
                     gzip_filename = backup_dir / f'{db}.sql.gz'
-                    #yesterdays_backup.hardlink_to(gzip_filename)
-                    gzip_filename.hardlink_to(yesterdays_backup)
+                    #previous_backup.hardlink_to(gzip_filename)
+                    gzip_filename.hardlink_to(previous_backup)
 
                 else:
                     log(f"Backup for {db} differs from previous backup. Compressing new dump.")
@@ -203,7 +202,7 @@ def main():
 
     args = parser.parse_args()
 
-    daily_dir = BACKUP_DIR / datetime.now().strftime('%Y-%m-%d')
+    daily_dir = BACKUP_DIR / CURRENT_DATE
     daily_dir.mkdir(exist_ok=True)
 
     backup_databases(
